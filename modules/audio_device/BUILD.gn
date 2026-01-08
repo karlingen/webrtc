@@ -424,6 +424,29 @@ if (is_mac) {
       "CoreGraphics.framework",
     ]
   }
+
+  # Audio loopback test to reproduce USB audio pulsating bug
+  # Usage: 
+  #  ./out/Debug/audio_loopback_test # default to first input and output device
+  #  ./out/Debug/audio_loopback_test [input device index] [output device index] # specify input and output devices
+  #
+  rtc_executable("audio_loopback_test") {
+    testonly = true
+    sources = [ "mac/audio_loopback_test.cc" ]
+    deps = [
+      ":audio_device_buffer",
+      ":audio_device_impl",
+      "../../api/environment:environment_factory",
+      "../../rtc_base:logging",
+      "../../rtc_base:timeutils",
+    ]
+    frameworks = [
+      "CoreAudio.framework",
+      "AudioToolbox.framework",
+      "ApplicationServices.framework",
+      "CoreGraphics.framework",
+    ]
+  }
 }
 
 rtc_source_set("mock_audio_device") {

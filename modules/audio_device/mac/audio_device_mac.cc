@@ -2301,9 +2301,11 @@ OSStatus AudioDeviceMac::implInDeviceIOProc(const AudioBufferList* inputData,
   _captureDelayUs = captureDelayUs;
 
   RTC_DCHECK(inputData->mNumberBuffers == 1);
-  ring_buffer_size_t numSamples = inputData->mBuffers->mDataByteSize *
-                                  _inStreamFormat.mChannelsPerFrame /
-                                  _inStreamFormat.mBytesPerPacket;
+  // For Float32 data, calculate number of Float32 samples (not frames).
+  // Ring buffer element size is sizeof(Float32), so this is the element count.
+  ring_buffer_size_t numSamples =
+      inputData->mBuffers->mDataByteSize / sizeof(Float32);
+
   PaUtil_WriteRingBuffer(_paCaptureBuffer, inputData->mBuffers->mData,
                          numSamples);
 
@@ -2422,62 +2424,140 @@ bool AudioDeviceMac::RenderWorkerThread() {
 
 bool AudioDeviceMac::CaptureWorkerThread() {
   OSStatus err = noErr;
-  UInt32 noRecSamples =
-      ENGINE_REC_BUF_SIZE_IN_SAMPLES * _inDesiredFormat.mChannelsPerFrame;
-  std::vector<SInt16> recordBuffer(noRecSamples);
+  UInt32 numChannels = _inStreamFormat.mChannelsPerFrame;
   UInt32 size = ENGINE_REC_BUF_SIZE_IN_SAMPLES;
+  std::vector<SInt16> recordBuffer;
 
-  AudioBufferList engineBuffer;
-  engineBuffer.mNumberBuffers = 1;  // Interleaved channels.
-  engineBuffer.mBuffers->mNumberChannels = _inDesiredFormat.mChannelsPerFrame;
-  engineBuffer.mBuffers->mDataByteSize =
-      _inDesiredFormat.mBytesPerPacket * noRecSamples;
-  engineBuffer.mBuffers->mData = recordBuffer.data();
+  // For multi-channel Float32 devices, bypass AudioConverter and convert directly.
+  // AudioConverter has issues with certain multi-channel configurations.
+  bool isFloat32 = (_inStreamFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+  if (numChannels > 1 && _inDesiredFormat.mChannelsPerFrame == 1 && isFloat32) {
+    ring_buffer_size_t numSamplesToRead =
+        ENGINE_REC_BUF_SIZE_IN_SAMPLES * numChannels;
 
-  err = AudioConverterFillComplexBuffer(_captureConverter, inConverterProc,
-                                        this, &size, &engineBuffer, NULL);
-  if (err != noErr) {
-    if (err == 1) {
-      // This is our own error.
-      return false;
-    } else {
-      logCAMsg(LS_ERROR, "Error in AudioConverterFillComplexBuffer()",
-               (const char*)&err);
-      return false;
+    // Wait for enough data in the ring buffer.
+    while (PaUtil_GetRingBufferReadAvailable(_paCaptureBuffer) <
+           numSamplesToRead) {
+      mach_timespec_t timeout;
+      timeout.tv_sec = 0;
+      timeout.tv_nsec = TIMER_PERIOD_MS;
+
+      kern_return_t kernErr = semaphore_timedwait(_captureSemaphore, timeout);
+      if (kernErr == KERN_OPERATION_TIMED_OUT) {
+        int32_t signal = _captureDeviceIsAlive;
+        if (signal == 0) {
+          return false;
+        }
+      } else if (kernErr != KERN_SUCCESS) {
+        RTC_LOG(LS_ERROR) << "semaphore_wait() error: " << kernErr;
+      }
+    }
+
+    // Read multi-channel Float32 data from ring buffer.
+    std::vector<Float32> multiChannelFloatBuffer(numSamplesToRead);
+    PaUtil_ReadRingBuffer(_paCaptureBuffer, multiChannelFloatBuffer.data(),
+                          numSamplesToRead);
+
+    // Get the system-configured preferred input channel.
+    UInt32 preferredChannel = GetPreferredInputChannel();
+    if (preferredChannel >= numChannels) {
+      preferredChannel = 0;  // Fallback if preferred channel is out of range.
+    }
+
+    // Convert Float32 to int16 and extract the preferred channel.
+    recordBuffer.resize(ENGINE_REC_BUF_SIZE_IN_SAMPLES);
+    for (UInt32 frame = 0; frame < ENGINE_REC_BUF_SIZE_IN_SAMPLES; frame++) {
+      Float32 floatSample =
+          multiChannelFloatBuffer[frame * numChannels + preferredChannel];
+
+      // Clamp to valid range and convert to int16.
+      floatSample = std::max(-1.0f, std::min(1.0f, floatSample));
+      recordBuffer[frame] = static_cast<SInt16>(floatSample * 32767.0f);
+    }
+  } else {
+    // Standard path for single-channel or non-Float32 devices.
+    UInt32 noRecSamples =
+        ENGINE_REC_BUF_SIZE_IN_SAMPLES * _inDesiredFormat.mChannelsPerFrame;
+    recordBuffer.resize(noRecSamples);
+
+    AudioBufferList engineBuffer;
+    engineBuffer.mNumberBuffers = 1;  // Interleaved channels.
+    engineBuffer.mBuffers->mNumberChannels = _inDesiredFormat.mChannelsPerFrame;
+    engineBuffer.mBuffers->mDataByteSize =
+        _inDesiredFormat.mBytesPerPacket * noRecSamples;
+    engineBuffer.mBuffers->mData = recordBuffer.data();
+
+    err = AudioConverterFillComplexBuffer(_captureConverter, inConverterProc,
+                                          this, &size, &engineBuffer, NULL);
+    if (err != noErr) {
+      if (err == 1) {
+        // This is our own error.
+        return false;
+      } else {
+        logCAMsg(LS_ERROR, "Error in AudioConverterFillComplexBuffer()",
+                 (const char*)&err);
+        return false;
+      }
+    }
+
+    // AudioConverter may return fewer samples than requested.
+    if (size != ENGINE_REC_BUF_SIZE_IN_SAMPLES) {
+      return true;
     }
   }
 
-  // TODO(xians): what if the returned size is incorrect?
-  if (size == ENGINE_REC_BUF_SIZE_IN_SAMPLES) {
-    int32_t msecOnPlaySide;
-    int32_t msecOnRecordSide;
+  // Deliver recorded buffer to AudioDeviceBuffer.
+  int32_t captureDelayUs = _captureDelayUs;
+  int32_t renderDelayUs = _renderDelayUs;
+  int32_t msecOnPlaySide =
+      static_cast<int32_t>(1e-3 * (renderDelayUs + _renderLatencyUs) + 0.5);
+  int32_t msecOnRecordSide =
+      static_cast<int32_t>(1e-3 * (captureDelayUs + _captureLatencyUs) + 0.5);
 
-    int32_t captureDelayUs = _captureDelayUs;
-    int32_t renderDelayUs = _renderDelayUs;
-
-    msecOnPlaySide =
-        static_cast<int32_t>(1e-3 * (renderDelayUs + _renderLatencyUs) + 0.5);
-    msecOnRecordSide =
-        static_cast<int32_t>(1e-3 * (captureDelayUs + _captureLatencyUs) + 0.5);
-
-    if (!_ptrAudioBuffer) {
-      RTC_LOG(LS_ERROR) << "capture AudioBuffer is invalid";
-      return false;
-    }
-
-    // store the recorded buffer (no action will be taken if the
-    // #recorded samples is not a full buffer)
-    _ptrAudioBuffer->SetRecordedBuffer((int8_t*)recordBuffer.data(),
-                                       (uint32_t)size);
-    _ptrAudioBuffer->SetVQEData(msecOnPlaySide, msecOnRecordSide);
-    _ptrAudioBuffer->SetTypingStatus(KeyPressed());
-
-    // deliver recorded samples at specified sample rate, mic level etc.
-    // to the observer using callback
-    _ptrAudioBuffer->DeliverRecordedData();
+  if (!_ptrAudioBuffer) {
+    RTC_LOG(LS_ERROR) << "capture AudioBuffer is invalid";
+    return false;
   }
+
+  _ptrAudioBuffer->SetRecordedBuffer(
+      reinterpret_cast<int8_t*>(recordBuffer.data()),
+      ENGINE_REC_BUF_SIZE_IN_SAMPLES);
+  _ptrAudioBuffer->SetVQEData(msecOnPlaySide, msecOnRecordSide);
+  _ptrAudioBuffer->SetTypingStatus(KeyPressed());
+  _ptrAudioBuffer->DeliverRecordedData();
 
   return true;
+}
+
+UInt32 AudioDeviceMac::GetPreferredInputChannel() {
+  // Query CoreAudio for the device's preferred channels for stereo input.
+  // This respects the user's system configuration in Audio MIDI Setup.
+  AudioObjectPropertyAddress propertyAddress = {
+      kAudioDevicePropertyPreferredChannelsForStereo,
+      kAudioDevicePropertyScopeInput,
+      kAudioObjectPropertyElementMain};
+
+  UInt32 preferredChannels[2] = {1, 2};  // Default: channels 1 and 2 (1-indexed)
+  UInt32 size = sizeof(preferredChannels);
+
+  OSStatus err = AudioObjectGetPropertyData(
+      _inputDeviceID, &propertyAddress, 0, nullptr, &size, preferredChannels);
+
+  if (err != noErr) {
+    // If query fails, default to channel 0 (first channel).
+    RTC_LOG(LS_WARNING) << "Failed to get preferred input channels, "
+                        << "defaulting to channel 0";
+    return 0;
+  }
+
+  // CoreAudio returns 1-indexed channel numbers, convert to 0-indexed.
+  // Use the first preferred channel for mono recording.
+  UInt32 preferredChannel = preferredChannels[0] > 0 ? preferredChannels[0] - 1 : 0;
+
+  RTC_LOG(LS_INFO) << "Using preferred input channel: " << preferredChannel
+                   << " (system configured: " << preferredChannels[0] << ")";
+
+  return preferredChannel;
 }
 
 bool AudioDeviceMac::KeyPressed() {
