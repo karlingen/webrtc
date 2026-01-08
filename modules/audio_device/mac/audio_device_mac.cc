@@ -2491,6 +2491,7 @@ bool AudioDeviceMac::CaptureWorkerThread() {
     }
 
     // AudioConverter may return fewer samples than requested.
+    // TODO(xians): what if the returned size is incorrect?
     if (size != ENGINE_REC_BUF_SIZE_IN_SAMPLES) {
       return true;
     }
@@ -2509,11 +2510,15 @@ bool AudioDeviceMac::CaptureWorkerThread() {
     return false;
   }
 
+  // Store the recorded buffer (no action will be taken if the
+  // #recorded samples is not a full buffer).
   _ptrAudioBuffer->SetRecordedBuffer(
       reinterpret_cast<int8_t*>(recordBuffer.data()),
       ENGINE_REC_BUF_SIZE_IN_SAMPLES);
   _ptrAudioBuffer->SetVQEData(msecOnPlaySide, msecOnRecordSide);
   _ptrAudioBuffer->SetTypingStatus(KeyPressed());
+  // Deliver recorded samples at specified sample rate, mic level etc.
+  // to the observer using callback.
   _ptrAudioBuffer->DeliverRecordedData();
 
   return true;
