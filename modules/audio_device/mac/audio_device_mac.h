@@ -154,6 +154,15 @@ class AudioDeviceMac : public AudioDeviceGeneric {
   virtual void AttachAudioBuffer(AudioDeviceBuffer* audioBuffer)
       RTC_LOCKS_EXCLUDED(mutex_);
 
+  // Converts multi-channel Float32 audio to mono int16, extracting a specific
+  // channel. Clamps values to [-1.0, 1.0] before conversion.
+  // Public and static to allow unit testing.
+  static void ConvertFloat32ToInt16Mono(const Float32* multi_channel_input,
+                                        SInt16* mono_output,
+                                        UInt32 num_frames,
+                                        UInt32 num_channels,
+                                        UInt32 channel_to_extract);
+
  private:
   int32_t InitSpeakerLocked() RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   int32_t InitMicrophoneLocked() RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);

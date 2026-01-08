@@ -515,6 +515,9 @@ if (rtc_include_tests && !build_with_chromium) {
     if (is_linux || is_chromeos || is_mac || is_win) {
       sources += [ "audio_device_unittest.cc" ]
     }
+    if (is_mac) {
+      sources += [ "mac/audio_device_mac_unittest.cc" ]
+    }
     if (is_win) {
       sources += [ "win/core_audio_utility_win_unittest.cc" ]
       deps += [

@@ -2460,20 +2460,14 @@ bool AudioDeviceMac::CaptureWorkerThread() {
 
     // Get the system-configured preferred input channel.
     UInt32 preferredChannel = GetPreferredInputChannel();
-    if (preferredChannel >= numChannels) {
-      preferredChannel = 0;  // Fallback if preferred channel is out of range.
-    }
 
     // Convert Float32 to int16 and extract the preferred channel.
     recordBuffer.resize(ENGINE_REC_BUF_SIZE_IN_SAMPLES);
-    for (UInt32 frame = 0; frame < ENGINE_REC_BUF_SIZE_IN_SAMPLES; frame++) {
-      Float32 floatSample =
-          multiChannelFloatBuffer[frame * numChannels + preferredChannel];
-
-      // Clamp to valid range and convert to int16.
-      floatSample = std::max(-1.0f, std::min(1.0f, floatSample));
-      recordBuffer[frame] = static_cast<SInt16>(floatSample * 32767.0f);
-    }
+    ConvertFloat32ToInt16Mono(multiChannelFloatBuffer.data(),
+                              recordBuffer.data(),
+                              ENGINE_REC_BUF_SIZE_IN_SAMPLES,
+                              numChannels,
+                              preferredChannel);
   } else {
     // Standard path for single-channel or non-Float32 devices.
     UInt32 noRecSamples =
@@ -2527,6 +2521,28 @@ bool AudioDeviceMac::CaptureWorkerThread() {
   _ptrAudioBuffer->DeliverRecordedData();
 
   return true;
+}
+
+void AudioDeviceMac::ConvertFloat32ToInt16Mono(
+    const Float32* multi_channel_input,
+    SInt16* mono_output,
+    UInt32 num_frames,
+    UInt32 num_channels,
+    UInt32 channel_to_extract) {
+  // Ensure channel_to_extract is within valid range.
+  if (channel_to_extract >= num_channels) {
+    channel_to_extract = 0;
+  }
+
+  for (UInt32 frame = 0; frame < num_frames; frame++) {
+    Float32 sample = multi_channel_input[frame * num_channels + channel_to_extract];
+    
+    // Clamp to [-1.0, 1.0] range before conversion.
+    sample = std::max(-1.0f, std::min(1.0f, sample));
+    
+    // Convert to int16 range [-32768, 32767].
+    mono_output[frame] = static_cast<SInt16>(sample * 32767.0f);
+  }
 }
 
 UInt32 AudioDeviceMac::GetPreferredInputChannel() {
