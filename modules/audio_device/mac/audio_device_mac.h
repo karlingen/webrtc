@@ -267,10 +267,6 @@ class AudioDeviceMac : public AudioDeviceGeneric {
   bool CaptureWorkerThread();
   bool RenderWorkerThread();
 
-  // Returns the preferred input channel index (0-indexed) for the input device.
-  // Queries CoreAudio for the system's preferred channel configuration.
-  UInt32 GetPreferredInputChannel();
-
   bool KeyPressed();
 
   AudioDeviceBuffer* _ptrAudioBuffer;

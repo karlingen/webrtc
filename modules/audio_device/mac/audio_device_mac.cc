@@ -2545,37 +2545,6 @@ void AudioDeviceMac::ConvertFloat32ToInt16Mono(
   }
 }
 
-UInt32 AudioDeviceMac::GetPreferredInputChannel() {
-  // Query CoreAudio for the device's preferred channels for stereo input.
-  // This respects the user's system configuration in Audio MIDI Setup.
-  AudioObjectPropertyAddress propertyAddress = {
-      kAudioDevicePropertyPreferredChannelsForStereo,
-      kAudioDevicePropertyScopeInput,
-      kAudioObjectPropertyElementMain};
-
-  UInt32 preferredChannels[2] = {1, 2};  // Default: channels 1 and 2 (1-indexed)
-  UInt32 size = sizeof(preferredChannels);
-
-  OSStatus err = AudioObjectGetPropertyData(
-      _inputDeviceID, &propertyAddress, 0, nullptr, &size, preferredChannels);
-
-  if (err != noErr) {
-    // If query fails, default to channel 0 (first channel).
-    RTC_LOG(LS_WARNING) << "Failed to get preferred input channels, "
-                        << "defaulting to channel 0";
-    return 0;
-  }
-
-  // CoreAudio returns 1-indexed channel numbers, convert to 0-indexed.
-  // Use the first preferred channel for mono recording.
-  UInt32 preferredChannel = preferredChannels[0] > 0 ? preferredChannels[0] - 1 : 0;
-
-  RTC_LOG(LS_INFO) << "Using preferred input channel: " << preferredChannel
-                   << " (system configured: " << preferredChannels[0] << ")";
-
-  return preferredChannel;
-}
-
 bool AudioDeviceMac::KeyPressed() {
   bool key_down = false;
   // Loop through all Mac virtual key constant values.
