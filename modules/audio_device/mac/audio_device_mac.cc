@@ -2458,16 +2458,12 @@ bool AudioDeviceMac::CaptureWorkerThread() {
     PaUtil_ReadRingBuffer(_paCaptureBuffer, multiChannelFloatBuffer.data(),
                           numSamplesToRead);
 
-    // Get the system-configured preferred input channel.
-    UInt32 preferredChannel = GetPreferredInputChannel();
-
-    // Convert Float32 to int16 and extract the preferred channel.
+    // Convert Float32 to int16 by mixing all channels to mono.
     recordBuffer.resize(ENGINE_REC_BUF_SIZE_IN_SAMPLES);
     ConvertFloat32ToInt16Mono(multiChannelFloatBuffer.data(),
                               recordBuffer.data(),
                               ENGINE_REC_BUF_SIZE_IN_SAMPLES,
-                              numChannels,
-                              preferredChannel);
+                              numChannels);
   } else {
     // Standard path for single-channel or non-Float32 devices.
     UInt32 noRecSamples =
@@ -2527,21 +2523,20 @@ void AudioDeviceMac::ConvertFloat32ToInt16Mono(
     const Float32* multi_channel_input,
     SInt16* mono_output,
     UInt32 num_frames,
-    UInt32 num_channels,
-    UInt32 channel_to_extract) {
-  // Ensure channel_to_extract is within valid range.
-  if (channel_to_extract >= num_channels) {
-    channel_to_extract = 0;
-  }
-
+    UInt32 num_channels) {
   for (UInt32 frame = 0; frame < num_frames; frame++) {
-    Float32 sample = multi_channel_input[frame * num_channels + channel_to_extract];
+    // Mix all channels by averaging them together (standard downmixing).
+    Float32 mixed_sample = 0.0f;
+    for (UInt32 ch = 0; ch < num_channels; ch++) {
+      mixed_sample += multi_channel_input[frame * num_channels + ch];
+    }
+    mixed_sample /= static_cast<Float32>(num_channels);
     
     // Clamp to [-1.0, 1.0] range before conversion.
-    sample = std::max(-1.0f, std::min(1.0f, sample));
+    mixed_sample = std::max(-1.0f, std::min(1.0f, mixed_sample));
     
     // Convert to int16 range [-32768, 32767].
-    mono_output[frame] = static_cast<SInt16>(sample * 32767.0f);
+    mono_output[frame] = static_cast<SInt16>(mixed_sample * 32767.0f);
   }
 }
 
