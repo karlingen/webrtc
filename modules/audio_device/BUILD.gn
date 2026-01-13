@@ -426,7 +426,7 @@ if (is_mac) {
   }
 
   # Audio loopback test to reproduce USB audio pulsating bug
-  # Usage: 
+  # Usage:
   #  ./out/Debug/audio_loopback_test # default to first input and output device
   #  ./out/Debug/audio_loopback_test [input device index] [output device index] # specify input and output devices
   #
