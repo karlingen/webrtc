@@ -2428,9 +2428,11 @@ bool AudioDeviceMac::CaptureWorkerThread() {
   UInt32 size = ENGINE_REC_BUF_SIZE_IN_SAMPLES;
   std::vector<SInt16> recordBuffer;
 
-  // For multi-channel Float32 devices, bypass AudioConverter and convert directly.
-  // AudioConverter has issues with certain multi-channel configurations.
-  bool isFloat32 = (_inStreamFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+  // For multi-channel Float32 devices, bypass AudioConverter and convert
+  // directly. AudioConverter has issues with certain multi-channel
+  // configurations.
+  bool isFloat32 =
+      (_inStreamFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
   if (numChannels > 1 && _inDesiredFormat.mChannelsPerFrame == 1 && isFloat32) {
     ring_buffer_size_t numSamplesToRead =
         ENGINE_REC_BUF_SIZE_IN_SAMPLES * numChannels;
@@ -2462,8 +2464,7 @@ bool AudioDeviceMac::CaptureWorkerThread() {
     recordBuffer.resize(ENGINE_REC_BUF_SIZE_IN_SAMPLES);
     ConvertFloat32ToInt16Mono(multiChannelFloatBuffer.data(),
                               recordBuffer.data(),
-                              ENGINE_REC_BUF_SIZE_IN_SAMPLES,
-                              numChannels);
+                              ENGINE_REC_BUF_SIZE_IN_SAMPLES, numChannels);
   } else {
     // Standard path for single-channel or non-Float32 devices.
     UInt32 noRecSamples =
@@ -2536,10 +2537,10 @@ void AudioDeviceMac::ConvertFloat32ToInt16Mono(
       mixed_sample += multi_channel_input[frame * num_channels + ch];
     }
     mixed_sample /= static_cast<Float32>(num_channels);
-    
+
     // Clamp to [-1.0, 1.0] range before conversion.
     mixed_sample = std::max(-1.0f, std::min(1.0f, mixed_sample));
-    
+
     // Convert to int16 range [-32768, 32767].
     mono_output[frame] = static_cast<SInt16>(mixed_sample * 32767.0f);
   }

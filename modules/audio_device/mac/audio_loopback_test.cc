@@ -1,22 +1,32 @@
 /*
+ *  Copyright 2025 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+/*
  *  Audio Loopback Test for USB Audio Pulsating Bug
  *
  *  Captures audio from input device and plays it back to output device.
  *  This lets you HEAR if the pulsating bug is present.
  */
 
+#include <atomic>
 #include <chrono>
+#include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include <vector>
-#include <atomic>
-#include <iomanip>
 
 #include "api/environment/environment_factory.h"
 #include "modules/audio_device/audio_device_buffer.h"
 #include "modules/audio_device/mac/audio_device_mac.h"
 #include "rtc_base/logging.h"
-#include "rtc_base/synchronization/mutex.h"
 
 namespace webrtc {
 
@@ -26,11 +36,11 @@ class LoopbackAudioTransport : public AudioTransport {
   LoopbackAudioTransport() : recording_(false), playing_(false) {
     // Initialize loopback buffer
     loopback_buffer_.resize(48000 * 2 * 10);  // 10 seconds of stereo at 48kHz
-    
+
     // Prebuffer size: 100ms of stereo audio at 48kHz to prevent underruns
     prebuffer_samples_ = 48000 * 2 * 100 / 1000;  // 9600 samples
     prebuffered_ = false;
-    
+
     // Statistics
     record_callbacks_ = 0;
     playback_callbacks_ = 0;
@@ -58,25 +68,28 @@ class LoopbackAudioTransport : public AudioTransport {
       // Convert mono to stereo if needed and store in loopback buffer
       const int16_t* samples = static_cast<const int16_t*>(audioSamples);
 
-      MutexLock lock(&buffer_mutex_);
+      std::lock_guard<std::mutex> lock(buffer_mutex_);
       record_callbacks_++;
       total_samples_recorded_ += nSamples;
-      
+
       // Track callback timing
       auto now = std::chrono::steady_clock::now();
-      auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_record_callback_time_).count();
+      auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     now - last_record_callback_time_)
+                     .count();
       if (gap > 50) {  // Log large gaps
-        std::cout << "[WARNING] Large gap in record callbacks: " << gap << " ms" << std::endl;
+        std::cout << "[WARNING] Large gap in record callbacks: " << gap << " ms"
+                  << std::endl;
       }
       last_record_callback_time_ = now;
-      
+
       // Detect silence in input audio (CHECK IF MIC IS CUTTING OUT)
       int64_t sum_abs = 0;
       for (size_t i = 0; i < nSamples; i++) {
         sum_abs += std::abs(samples[i]);
       }
       int32_t avg_level = sum_abs / nSamples;
-      
+
       static int silence_count = 0;
       static int audio_count = 0;
       if (avg_level < 10) {  // Very quiet/silent
@@ -88,12 +101,13 @@ class LoopbackAudioTransport : public AudioTransport {
         }
       } else {
         if (silence_count > 0 && audio_count == 0) {
-          std::cout << "[INPUT RESUMED] After " << silence_count << " silent callbacks" << std::endl;
+          std::cout << "[INPUT RESUMED] After " << silence_count
+                    << " silent callbacks" << std::endl;
         }
         silence_count = 0;
         audio_count++;
       }
-      
+
       for (size_t i = 0; i < nSamples; i++) {
         int16_t sample = samples[i];
         // Write to both left and right channels
@@ -102,29 +116,31 @@ class LoopbackAudioTransport : public AudioTransport {
         loopback_buffer_[write_pos_] = sample;
         write_pos_ = (write_pos_ + 1) % loopback_buffer_.size();
       }
-      
+
       size_t available = GetAvailableSamplesLocked();
-      
+
       // Mark as prebuffered once we have enough data
       if (!prebuffered_ && available >= prebuffer_samples_) {
         prebuffered_ = true;
-        std::cout << "\n[PREBUFFER] Complete! Buffer has " << available 
-                  << " samples (" << (available / 48000.0 / 2.0 * 1000.0) 
+        std::cout << "\n[PREBUFFER] Complete! Buffer has " << available
+                  << " samples (" << (available / 48000.0 / 2.0 * 1000.0)
                   << " ms)" << std::endl;
       }
-      
+
       // Periodic logging every 2 seconds
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time_).count();
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         now - last_log_time_)
+                         .count();
       if (elapsed >= 2000) {
-        std::cout << "[STATUS] Record: " << record_callbacks_ << " calls (" 
-                  << total_samples_recorded_ << " samples, " << nSamples << " per call, "
-                  << nChannels << " ch, " << samplesPerSec << " Hz), Playback: " 
-                  << playback_callbacks_ << " calls (" << total_samples_played_ << " samples), "
-                  << "Buffer: " << available << " samples (" 
-                  << std::fixed << std::setprecision(1)
-                  << (available / 48000.0 / 2.0 * 1000.0) << " ms), " 
-                  << "Underruns: " << underrun_count_
-                  << std::endl;
+        std::cout << "[STATUS] Record: " << record_callbacks_ << " calls ("
+                  << total_samples_recorded_ << " samples, " << nSamples
+                  << " per call, " << nChannels << " ch, " << samplesPerSec
+                  << " Hz), Playback: " << playback_callbacks_ << " calls ("
+                  << total_samples_played_ << " samples), "
+                  << "Buffer: " << available << " samples (" << std::fixed
+                  << std::setprecision(1)
+                  << (available / 48000.0 / 2.0 * 1000.0) << " ms), "
+                  << "Underruns: " << underrun_count_ << std::endl;
         last_log_time_ = now;
       }
     }
@@ -162,55 +178,59 @@ class LoopbackAudioTransport : public AudioTransport {
     if (playing_ && audioSamples) {
       int16_t* samples = static_cast<int16_t*>(audioSamples);
 
-      MutexLock lock(&buffer_mutex_);
+      std::lock_guard<std::mutex> lock(buffer_mutex_);
       playback_callbacks_++;
-      
+
       // Track callback timing
       auto now = std::chrono::steady_clock::now();
-      auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_playback_callback_time_).count();
+      auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     now - last_playback_callback_time_)
+                     .count();
       if (gap > 50) {  // Log large gaps
-        std::cout << "[WARNING] Large gap in playback callbacks: " << gap << " ms" << std::endl;
+        std::cout << "[WARNING] Large gap in playback callbacks: " << gap
+                  << " ms" << std::endl;
       }
       last_playback_callback_time_ = now;
-      
+
       // Check if we have enough data available (prevent underrun)
       size_t required_samples = nSamples * nChannels;
       size_t available = GetAvailableSamplesLocked();
-      
+
       // Log first few playback requests to see parameters
       if (playback_callbacks_ <= 5) {
-        std::cout << "[PLAYBACK #" << playback_callbacks_ << "] nSamples: " 
-                  << nSamples << ", nChannels: " << nChannels 
-                  << ", required: " << required_samples 
+        std::cout << "[PLAYBACK #" << playback_callbacks_
+                  << "] nSamples: " << nSamples << ", nChannels: " << nChannels
+                  << ", required: " << required_samples
                   << ", available: " << available << std::endl;
       }
-      
+
       // If not prebuffered or buffer running too low, output silence
       if (!prebuffered_ || available < required_samples) {
         memset(audioSamples, 0, nSamples * nBytesPerSample * nChannels);
         underrun_count_++;
-        
+
         // Log underrun condition
         if (underrun_count_ == 1 || underrun_count_ % 100 == 0) {
           std::cout << "[UNDERRUN #" << underrun_count_ << "] "
-                    << "Required: " << required_samples 
+                    << "Required: " << required_samples
                     << ", Available: " << available
                     << ", Prebuffered: " << (prebuffered_ ? "YES" : "NO")
                     << ", Record callbacks: " << record_callbacks_
                     << ", Playback callbacks: " << playback_callbacks_
                     << std::endl;
         }
-        
+
         // If we've run out of data, reset prebuffering
         if (available < required_samples / 2) {
           if (prebuffered_) {
-            std::cout << "[RESET] Buffer depleted, resetting prebuffer state" << std::endl;
+            std::cout << "[RESET] Buffer depleted, resetting prebuffer state"
+                      << std::endl;
             prebuffered_ = false;
           }
         }
         return 0;
       }
-      
+
       // Read from buffer
       for (size_t i = 0; i < required_samples; i++) {
         samples[i] = loopback_buffer_[read_pos_];
@@ -233,33 +253,33 @@ class LoopbackAudioTransport : public AudioTransport {
                       int64_t* elapsed_time_ms,
                       int64_t* ntp_time_ms) override {}
 
-  void StartRecording() { 
-    MutexLock lock(&buffer_mutex_);
-    recording_ = true; 
+  void StartRecording() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    recording_ = true;
   }
-  
-  void StopRecording() { 
-    MutexLock lock(&buffer_mutex_);
-    recording_ = false; 
+
+  void StopRecording() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    recording_ = false;
   }
-  
-  void StartPlaying() { 
-    MutexLock lock(&buffer_mutex_);
-    playing_ = true; 
+
+  void StartPlaying() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    playing_ = true;
   }
-  
-  void StopPlaying() { 
-    MutexLock lock(&buffer_mutex_);
-    playing_ = false; 
+
+  void StopPlaying() {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    playing_ = false;
   }
-  
+
   bool IsPrebuffered() const {
-    MutexLock lock(&buffer_mutex_);
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
     return prebuffered_;
   }
-  
+
   size_t GetAvailableSamples() const {
-    MutexLock lock(&buffer_mutex_);
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
     return GetAvailableSamplesLocked();
   }
 
@@ -277,12 +297,12 @@ class LoopbackAudioTransport : public AudioTransport {
   std::vector<int16_t> loopback_buffer_;
   size_t write_pos_ = 0;
   size_t read_pos_ = 0;
-  mutable Mutex buffer_mutex_;
-  
+  mutable std::mutex buffer_mutex_;
+
   // Prebuffering to prevent initial underrun
   size_t prebuffer_samples_;
   bool prebuffered_;
-  
+
   // Statistics and logging
   std::atomic<uint64_t> record_callbacks_;
   std::atomic<uint64_t> playback_callbacks_;
@@ -397,7 +417,7 @@ int main(int argc, char* argv[]) {
       std::cout << "." << std::flush;
     }
   }
-  
+
   if (!transport.IsPrebuffered()) {
     std::cout << " timeout (continuing anyway)" << std::endl;
   }

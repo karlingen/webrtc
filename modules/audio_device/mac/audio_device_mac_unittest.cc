@@ -28,14 +28,14 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_BasicMixing) {
   const UInt32 num_frames = 4;
   const UInt32 num_channels = 2;
 
-  Float32 input[] = {0.5f, -0.5f,   // Frame 0: avg=(0.5-0.5)/2=0.0
-                     0.0f, 0.0f,     // Frame 1: avg=(0.0+0.0)/2=0.0
-                     1.0f, -1.0f,    // Frame 2: avg=(1.0-1.0)/2=0.0
-                     -0.25f, 0.25f}; // Frame 3: avg=(-0.25+0.25)/2=0.0
+  Float32 input[] = {0.5f,   -0.5f,   // Frame 0: avg=(0.5-0.5)/2=0.0
+                     0.0f,   0.0f,    // Frame 1: avg=(0.0+0.0)/2=0.0
+                     1.0f,   -1.0f,   // Frame 2: avg=(1.0-1.0)/2=0.0
+                     -0.25f, 0.25f};  // Frame 3: avg=(-0.25+0.25)/2=0.0
 
-  SInt16 output[num_frames];
+  std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
                                             num_channels);
 
   // All frames should average to 0.
@@ -50,13 +50,13 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_StereoMixing) {
   const UInt32 num_frames = 3;
   const UInt32 num_channels = 2;
 
-  Float32 input[] = {0.2f, 0.4f,    // Frame 0: avg=(0.2+0.4)/2=0.3
-                     0.6f, 0.8f,    // Frame 1: avg=(0.6+0.8)/2=0.7
-                     -0.2f, -0.6f}; // Frame 2: avg=(-0.2-0.6)/2=-0.4
+  Float32 input[] = {0.2f,  0.4f,    // Frame 0: avg=(0.2+0.4)/2=0.3
+                     0.6f,  0.8f,    // Frame 1: avg=(0.6+0.8)/2=0.7
+                     -0.2f, -0.6f};  // Frame 2: avg=(-0.2-0.6)/2=-0.4
 
-  SInt16 output[num_frames];
+  std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
                                             num_channels);
 
   // Expected values after averaging channels.
@@ -70,12 +70,12 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_ClampingPositive) {
   const UInt32 num_frames = 3;
   const UInt32 num_channels = 2;
 
-  Float32 input[] = {1.0f, 1.0f,    // Frame 0: avg=1.0 (at limit)
-                     1.5f, 1.5f,    // Frame 1: avg=1.5 (above, clamped)
-                     2.0f, 3.0f};   // Frame 2: avg=2.5 (above, clamped)
-  SInt16 output[num_frames];
+  Float32 input[] = {1.0f, 1.0f,   // Frame 0: avg=1.0 (at limit)
+                     1.5f, 1.5f,   // Frame 1: avg=1.5 (above, clamped)
+                     2.0f, 3.0f};  // Frame 2: avg=2.5 (above, clamped)
+  std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
                                             num_channels);
 
   // Frame 0 at limit, frames 1-2 clamped to max.
@@ -89,12 +89,12 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_ClampingNegative) {
   const UInt32 num_frames = 3;
   const UInt32 num_channels = 2;
 
-  Float32 input[] = {-1.0f, -1.0f,    // Frame 0: avg=-1.0 (at limit)
-                     -1.5f, -1.5f,    // Frame 1: avg=-1.5 (below, clamped)
-                     -2.0f, -3.0f};   // Frame 2: avg=-2.5 (below, clamped)
-  SInt16 output[num_frames];
+  Float32 input[] = {-1.0f, -1.0f,   // Frame 0: avg=-1.0 (at limit)
+                     -1.5f, -1.5f,   // Frame 1: avg=-1.5 (below, clamped)
+                     -2.0f, -3.0f};  // Frame 2: avg=-2.5 (below, clamped)
+  std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
                                             num_channels);
 
   // All should be clamped to min representable value.
@@ -111,13 +111,13 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_MultiChannel8) {
   // Frame 0: sum=3.6, avg=3.6/8=0.45
   // Frame 1: sum=-3.6, avg=-3.6/8=-0.45
   Float32 input[] = {
-      0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f,  // Frame 0
+      0.1f,  0.2f,  0.3f,  0.4f,  0.5f,  0.6f,  0.7f,  0.8f,  // Frame 0
       -0.1f, -0.2f, -0.3f, -0.4f, -0.5f, -0.6f, -0.7f, -0.8f  // Frame 1
   };
 
-  SInt16 output[num_frames];
+  std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
                                             num_channels);
 
   // Should average all 8 channels.
@@ -131,9 +131,9 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_SingleChannel) {
   const UInt32 num_channels = 1;
 
   Float32 input[] = {0.5f, -0.3f, 0.8f};
-  SInt16 output[num_frames];
+  std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
                                             num_channels);
 
   // Single channel should pass through unchanged.
@@ -163,9 +163,9 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_BoundaryValues) {
   const UInt32 num_channels = 1;
 
   Float32 input[] = {-1.0f, 0.0f, 1.0f};
-  SInt16 output[num_frames];
+  std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
                                             num_channels);
 
   EXPECT_EQ(output[0], -32767);
