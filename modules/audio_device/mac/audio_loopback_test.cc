@@ -1,5 +1,5 @@
 /*
- *  Copyright 2025 The WebRTC Project Authors. All rights reserved.
+ *  Copyright 2026 The WebRTC Project Authors. All rights reserved.
  *
  *  Use of this source code is governed by a BSD-style license
  *  that can be found in the LICENSE file in the root of the source
@@ -9,17 +9,17 @@
  */
 
 /*
- *  Audio Loopback Test for USB Audio Pulsating Bug
+ *  Audio loopback test for the macOS audio device module.
  *
- *  Captures audio from input device and plays it back to output device.
- *  This lets you HEAR if the pulsating bug is present.
+ *  Captures audio from an input device and plays it back on an output device.
+ *  Useful for manually verifying that multi-channel input devices work
+ *  correctly with the AudioDeviceMac implementation.
  */
 
 #include <atomic>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -27,27 +27,31 @@
 #include "modules/audio_device/audio_device_buffer.h"
 #include "modules/audio_device/mac/audio_device_mac.h"
 #include "rtc_base/logging.h"
+#include "rtc_base/synchronization/mutex.h"
+#include "system_wrappers/include/clock.h"
 
 namespace webrtc {
 
-// Audio transport that loops captured audio back to playback
+// Audio transport that loops captured audio back to playback.
 class LoopbackAudioTransport : public AudioTransport {
  public:
   LoopbackAudioTransport() : recording_(false), playing_(false) {
-    // Initialize loopback buffer
+    // Initialize loopback buffer.
     loopback_buffer_.resize(48000 * 2 * 10);  // 10 seconds of stereo at 48kHz
 
-    // Prebuffer size: 100ms of stereo audio at 48kHz to prevent underruns
+    // Prebuffer size: 100ms of stereo audio at 48kHz to prevent underruns.
     prebuffer_samples_ = 48000 * 2 * 100 / 1000;  // 9600 samples
     prebuffered_ = false;
 
-    // Statistics
+    // Statistics.
     record_callbacks_ = 0;
     playback_callbacks_ = 0;
     underrun_count_ = 0;
-    last_log_time_ = std::chrono::steady_clock::now();
-    last_record_callback_time_ = std::chrono::steady_clock::now();
-    last_playback_callback_time_ = std::chrono::steady_clock::now();
+    last_log_time_ = Clock::GetRealTimeClock()->TimeInMilliseconds();
+    last_record_callback_time_ =
+        Clock::GetRealTimeClock()->TimeInMilliseconds();
+    last_playback_callback_time_ =
+        Clock::GetRealTimeClock()->TimeInMilliseconds();
     total_samples_recorded_ = 0;
     total_samples_played_ = 0;
   }
@@ -68,20 +72,18 @@ class LoopbackAudioTransport : public AudioTransport {
       // Convert mono to stereo if needed and store in loopback buffer
       const int16_t* samples = static_cast<const int16_t*>(audioSamples);
 
-      std::lock_guard<std::mutex> lock(buffer_mutex_);
+      MutexLock lock(&buffer_mutex_);
       record_callbacks_++;
       total_samples_recorded_ += nSamples;
 
-      // Track callback timing
-      auto now = std::chrono::steady_clock::now();
-      auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(
-                     now - last_record_callback_time_)
-                     .count();
-      if (gap > 50) {  // Log large gaps
+      // Track callback timing.
+      int64_t now_ms = Clock::GetRealTimeClock()->TimeInMilliseconds();
+      int64_t gap = now_ms - last_record_callback_time_;
+      if (gap > 50) {
         std::cout << "[WARNING] Large gap in record callbacks: " << gap << " ms"
                   << std::endl;
       }
-      last_record_callback_time_ = now;
+      last_record_callback_time_ = now_ms;
 
       // Detect silence in input audio (CHECK IF MIC IS CUTTING OUT)
       int64_t sum_abs = 0;
@@ -127,10 +129,8 @@ class LoopbackAudioTransport : public AudioTransport {
                   << " ms)" << std::endl;
       }
 
-      // Periodic logging every 2 seconds
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         now - last_log_time_)
-                         .count();
+      // Periodic logging every 2 seconds.
+      int64_t elapsed = now_ms - last_log_time_;
       if (elapsed >= 2000) {
         std::cout << "[STATUS] Record: " << record_callbacks_ << " calls ("
                   << total_samples_recorded_ << " samples, " << nSamples
@@ -141,7 +141,7 @@ class LoopbackAudioTransport : public AudioTransport {
                   << std::setprecision(1)
                   << (available / 48000.0 / 2.0 * 1000.0) << " ms), "
                   << "Underruns: " << underrun_count_ << std::endl;
-        last_log_time_ = now;
+        last_log_time_ = now_ms;
       }
     }
 
@@ -178,19 +178,17 @@ class LoopbackAudioTransport : public AudioTransport {
     if (playing_ && audioSamples) {
       int16_t* samples = static_cast<int16_t*>(audioSamples);
 
-      std::lock_guard<std::mutex> lock(buffer_mutex_);
+      MutexLock lock(&buffer_mutex_);
       playback_callbacks_++;
 
-      // Track callback timing
-      auto now = std::chrono::steady_clock::now();
-      auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(
-                     now - last_playback_callback_time_)
-                     .count();
-      if (gap > 50) {  // Log large gaps
+      // Track callback timing.
+      int64_t now_ms = Clock::GetRealTimeClock()->TimeInMilliseconds();
+      int64_t gap = now_ms - last_playback_callback_time_;
+      if (gap > 50) {
         std::cout << "[WARNING] Large gap in playback callbacks: " << gap
                   << " ms" << std::endl;
       }
-      last_playback_callback_time_ = now;
+      last_playback_callback_time_ = now_ms;
 
       // Check if we have enough data available (prevent underrun)
       size_t required_samples = nSamples * nChannels;
@@ -254,32 +252,32 @@ class LoopbackAudioTransport : public AudioTransport {
                       int64_t* ntp_time_ms) override {}
 
   void StartRecording() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    MutexLock lock(&buffer_mutex_);
     recording_ = true;
   }
 
   void StopRecording() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    MutexLock lock(&buffer_mutex_);
     recording_ = false;
   }
 
   void StartPlaying() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    MutexLock lock(&buffer_mutex_);
     playing_ = true;
   }
 
   void StopPlaying() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    MutexLock lock(&buffer_mutex_);
     playing_ = false;
   }
 
   bool IsPrebuffered() const {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    MutexLock lock(&buffer_mutex_);
     return prebuffered_;
   }
 
   size_t GetAvailableSamples() const {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    MutexLock lock(&buffer_mutex_);
     return GetAvailableSamplesLocked();
   }
 
@@ -297,7 +295,7 @@ class LoopbackAudioTransport : public AudioTransport {
   std::vector<int16_t> loopback_buffer_;
   size_t write_pos_ = 0;
   size_t read_pos_ = 0;
-  mutable std::mutex buffer_mutex_;
+  mutable Mutex buffer_mutex_;
 
   // Prebuffering to prevent initial underrun
   size_t prebuffer_samples_;
@@ -309,17 +307,18 @@ class LoopbackAudioTransport : public AudioTransport {
   std::atomic<uint64_t> underrun_count_;
   std::atomic<uint64_t> total_samples_recorded_;
   std::atomic<uint64_t> total_samples_played_;
-  std::chrono::steady_clock::time_point last_log_time_;
-  std::chrono::steady_clock::time_point last_record_callback_time_;
-  std::chrono::steady_clock::time_point last_playback_callback_time_;
+  int64_t last_log_time_;
+  int64_t last_record_callback_time_;
+  int64_t last_playback_callback_time_;
 };
 
 }  // namespace webrtc
 
 int main(int argc, char* argv[]) {
-  std::cout << "\n=== Audio Loopback Test for USB Audio Bug ===" << std::endl;
-  std::cout << "This test captures audio and plays it back." << std::endl;
-  std::cout << "You will HEAR if the pulsating bug is present.\n" << std::endl;
+  std::cout << "\n=== Audio Loopback Test ===" << std::endl;
+  std::cout << "Captures audio from the input device and plays it back"
+            << " on the output device." << std::endl;
+  std::cout << std::endl;
 
   // Create audio device
   auto audio_device = std::make_unique<webrtc::AudioDeviceMac>();
@@ -429,8 +428,10 @@ int main(int argc, char* argv[]) {
   transport.StartPlaying();
 
   std::cout << "Loopback running..." << std::endl;
-  std::cout << "\nIF YOU HEAR PULSATING: Bug still present" << std::endl;
-  std::cout << "IF AUDIO IS CONTINUOUS: Bug is fixed!\n" << std::endl;
+  std::cout << "\nAudio is looping from input to output." << std::endl;
+  std::cout << "Continuous playback indicates the ADM"
+            << " is functioning correctly.\n"
+            << std::endl;
 
   // Run for 60 seconds
   for (int i = 0; i < 60; i++) {

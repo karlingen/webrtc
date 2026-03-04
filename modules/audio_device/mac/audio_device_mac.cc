@@ -14,6 +14,7 @@
 #include <mach/mach.h>   // mach_task_self()
 #include <sys/sysctl.h>  // sysctlbyname()
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -2301,8 +2302,10 @@ OSStatus AudioDeviceMac::implInDeviceIOProc(const AudioBufferList* inputData,
   _captureDelayUs = captureDelayUs;
 
   RTC_DCHECK(inputData->mNumberBuffers == 1);
-  // For Float32 data, calculate number of Float32 samples (not frames).
-  // Ring buffer element size is sizeof(Float32), so this is the element count.
+  // Compute the number of ring buffer elements to write. The ring buffer was
+  // initialized with element size sizeof(Float32), so dividing the total byte
+  // count by sizeof(Float32) gives the correct element count regardless of the
+  // device's sample format.
   ring_buffer_size_t numSamples =
       inputData->mBuffers->mDataByteSize / sizeof(Float32);
 
@@ -2428,16 +2431,24 @@ bool AudioDeviceMac::CaptureWorkerThread() {
   UInt32 size = ENGINE_REC_BUF_SIZE_IN_SAMPLES;
   std::vector<SInt16> recordBuffer;
 
-  // For multi-channel Float32 devices, bypass AudioConverter and convert
-  // directly. AudioConverter has issues with certain multi-channel
-  // configurations.
+  // For multi-channel Float32 input devices requesting mono output, bypass
+  // AudioConverter and downmix manually. AudioConverter fails silently for
+  // certain multi-channel Float32 configurations (e.g., Audient EVO, MOTU,
+  // Focusrite interfaces), delivering silence or corrupted audio instead of
+  // the expected mono mix. See
+  // https://bugs.chromium.org/p/webrtc/issues/detail?id=42221475. Non-Float32
+  // devices and stereo output requests continue to use the AudioConverter path,
+  // which handles those cases correctly.
   bool isFloat32 =
       (_inStreamFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
   if (numChannels > 1 && _inDesiredFormat.mChannelsPerFrame == 1 && isFloat32) {
     ring_buffer_size_t numSamplesToRead =
         ENGINE_REC_BUF_SIZE_IN_SAMPLES * numChannels;
 
-    // Wait for enough data in the ring buffer.
+    // Wait for enough data in the ring buffer. _captureSemaphore is signalled
+    // by implInDeviceIOProc each time new data is written to _paCaptureBuffer.
+    // This mirrors the design of the standard AudioConverter path in
+    // implInConverterProc, with the same timeout and liveness check.
     while (PaUtil_GetRingBufferReadAvailable(_paCaptureBuffer) <
            numSamplesToRead) {
       mach_timespec_t timeout;
@@ -2456,17 +2467,18 @@ bool AudioDeviceMac::CaptureWorkerThread() {
     }
 
     // Read multi-channel Float32 data from ring buffer.
-    std::vector<Float32> multiChannelFloatBuffer(numSamplesToRead);
-    PaUtil_ReadRingBuffer(_paCaptureBuffer, multiChannelFloatBuffer.data(),
+    _captureMultiChannelBuffer.resize(numSamplesToRead);
+    PaUtil_ReadRingBuffer(_paCaptureBuffer, _captureMultiChannelBuffer.data(),
                           numSamplesToRead);
 
     // Convert Float32 to int16 by mixing all channels to mono.
     recordBuffer.resize(ENGINE_REC_BUF_SIZE_IN_SAMPLES);
-    ConvertFloat32ToInt16Mono(multiChannelFloatBuffer.data(),
-                              recordBuffer.data(),
-                              ENGINE_REC_BUF_SIZE_IN_SAMPLES, numChannels);
+    ConvertFloat32ToInt16Mono(_captureMultiChannelBuffer, recordBuffer,
+                              numChannels);
   } else {
-    // Standard path for single-channel or non-Float32 devices.
+    // Standard path: single-channel devices, non-Float32 devices, or stereo
+    // output requests. AudioConverter handles sample rate conversion and
+    // format conversion (e.g., Int16 -> Int16) via implInConverterProc.
     UInt32 noRecSamples =
         ENGINE_REC_BUF_SIZE_IN_SAMPLES * _inDesiredFormat.mChannelsPerFrame;
     recordBuffer.resize(noRecSamples);
@@ -2526,20 +2538,21 @@ bool AudioDeviceMac::CaptureWorkerThread() {
 }
 
 void AudioDeviceMac::ConvertFloat32ToInt16Mono(
-    const Float32* multi_channel_input,
-    SInt16* mono_output,
-    UInt32 num_frames,
+    ArrayView<const Float32> multi_channel_input,
+    ArrayView<SInt16> mono_output,
     UInt32 num_channels) {
+  const UInt32 num_frames = static_cast<UInt32>(mono_output.size());
+  const Float32 inv_num_channels = 1.0f / static_cast<Float32>(num_channels);
   for (UInt32 frame = 0; frame < num_frames; frame++) {
     // Mix all channels by averaging them together (standard downmixing).
     Float32 mixed_sample = 0.0f;
     for (UInt32 ch = 0; ch < num_channels; ch++) {
       mixed_sample += multi_channel_input[frame * num_channels + ch];
     }
-    mixed_sample /= static_cast<Float32>(num_channels);
+    mixed_sample *= inv_num_channels;
 
     // Clamp to [-1.0, 1.0] range before conversion.
-    mixed_sample = std::max(-1.0f, std::min(1.0f, mixed_sample));
+    mixed_sample = std::clamp(mixed_sample, -1.0f, 1.0f);
 
     // Convert to int16 range [-32768, 32767].
     mono_output[frame] = static_cast<SInt16>(mixed_sample * 32767.0f);

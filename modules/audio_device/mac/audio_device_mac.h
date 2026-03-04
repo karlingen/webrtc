@@ -17,8 +17,10 @@
 
 #include <atomic>
 #include <memory>
+#include <vector>
 
 #include "absl/strings/string_view.h"
+#include "api/array_view.h"
 #include "modules/audio_device/audio_device_generic.h"
 #include "modules/audio_device/mac/audio_mixer_manager_mac.h"
 #include "rtc_base/event.h"
@@ -157,10 +159,11 @@ class AudioDeviceMac : public AudioDeviceGeneric {
   // Converts multi-channel Float32 audio to mono int16 by averaging all
   // channels together (standard downmixing). Clamps values to [-1.0, 1.0]
   // before conversion. Public and static to allow unit testing.
-  static void ConvertFloat32ToInt16Mono(const Float32* multi_channel_input,
-                                        SInt16* mono_output,
-                                        UInt32 num_frames,
-                                        UInt32 num_channels);
+  // Input size must equal mono_output.size() * num_channels.
+  static void ConvertFloat32ToInt16Mono(
+      ArrayView<const Float32> multi_channel_input,
+      ArrayView<SInt16> mono_output,
+      UInt32 num_channels);
 
  private:
   int32_t InitSpeakerLocked() RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
@@ -343,6 +346,10 @@ class AudioDeviceMac : public AudioDeviceGeneric {
 
   int _captureBufSizeSamples;
   int _renderBufSizeSamples;
+
+  // Reusable buffer for multi-channel Float32 capture data, avoiding
+  // per-call heap allocation in CaptureWorkerThread.
+  std::vector<Float32> _captureMultiChannelBuffer;
 
   // Typing detection
   // 0x5c is key "9", after that comes function keys.

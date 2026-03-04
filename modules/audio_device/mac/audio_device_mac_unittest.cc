@@ -16,6 +16,7 @@
 #include <cmath>
 #include <vector>
 
+#include "api/array_view.h"
 #include "test/gtest.h"
 
 namespace webrtc {
@@ -35,8 +36,7 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_BasicMixing) {
 
   std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_channels);
 
   // All frames should average to 0.
   EXPECT_EQ(output[0], 0);
@@ -56,8 +56,7 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_StereoMixing) {
 
   std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_channels);
 
   // Expected values after averaging channels.
   EXPECT_EQ(output[0], static_cast<SInt16>(0.3f * 32767.0f));
@@ -75,8 +74,7 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_ClampingPositive) {
                      2.0f, 3.0f};  // Frame 2: avg=2.5 (above, clamped)
   std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_channels);
 
   // Frame 0 at limit, frames 1-2 clamped to max.
   EXPECT_EQ(output[0], 32767);
@@ -94,8 +92,7 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_ClampingNegative) {
                      -2.0f, -3.0f};  // Frame 2: avg=-2.5 (below, clamped)
   std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_channels);
 
   // All should be clamped to min representable value.
   EXPECT_EQ(output[0], -32767);
@@ -117,8 +114,7 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_MultiChannel8) {
 
   std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_channels);
 
   // Should average all 8 channels.
   EXPECT_EQ(output[0], static_cast<SInt16>(0.45f * 32767.0f));
@@ -133,8 +129,7 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_SingleChannel) {
   Float32 input[] = {0.5f, -0.3f, 0.8f};
   std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_channels);
 
   // Single channel should pass through unchanged.
   EXPECT_EQ(output[0], static_cast<SInt16>(0.5f * 32767.0f));
@@ -144,17 +139,14 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_SingleChannel) {
 
 TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_ZeroFrames) {
   // Test edge case with zero frames (no-op).
-  const UInt32 num_frames = 0;
   const UInt32 num_channels = 2;
+  SInt16 sentinel = 42;
 
-  Float32 input[] = {0.5f, -0.5f};
-  SInt16 output[1] = {42};  // Sentinel value
-
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(ArrayView<const Float32>(),
+                                            ArrayView<SInt16>(), num_channels);
 
   // Output should remain unchanged.
-  EXPECT_EQ(output[0], 42);
+  EXPECT_EQ(sentinel, 42);
 }
 
 TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_BoundaryValues) {
@@ -165,8 +157,7 @@ TEST_F(AudioDeviceMacTest, ConvertFloat32ToInt16Mono_BoundaryValues) {
   Float32 input[] = {-1.0f, 0.0f, 1.0f};
   std::vector<SInt16> output(num_frames);
 
-  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output.data(), num_frames,
-                                            num_channels);
+  AudioDeviceMac::ConvertFloat32ToInt16Mono(input, output, num_channels);
 
   EXPECT_EQ(output[0], -32767);
   EXPECT_EQ(output[1], 0);
