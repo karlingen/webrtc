@@ -14,6 +14,7 @@
 #include <mach/mach.h>   // mach_task_self()
 #include <sys/sysctl.h>  // sysctlbyname()
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -2301,9 +2302,13 @@ OSStatus AudioDeviceMac::implInDeviceIOProc(const AudioBufferList* inputData,
   _captureDelayUs = captureDelayUs;
 
   RTC_DCHECK(inputData->mNumberBuffers == 1);
-  ring_buffer_size_t numSamples = inputData->mBuffers->mDataByteSize *
-                                  _inStreamFormat.mChannelsPerFrame /
-                                  _inStreamFormat.mBytesPerPacket;
+  // Compute the number of ring buffer elements to write. The ring buffer was
+  // initialized with element size sizeof(Float32), so dividing the total byte
+  // count by sizeof(Float32) gives the correct element count regardless of the
+  // device's sample format.
+  ring_buffer_size_t numSamples =
+      inputData->mBuffers->mDataByteSize / sizeof(Float32);
+
   PaUtil_WriteRingBuffer(_paCaptureBuffer, inputData->mBuffers->mData,
                          numSamples);
 
@@ -2422,62 +2427,136 @@ bool AudioDeviceMac::RenderWorkerThread() {
 
 bool AudioDeviceMac::CaptureWorkerThread() {
   OSStatus err = noErr;
-  UInt32 noRecSamples =
-      ENGINE_REC_BUF_SIZE_IN_SAMPLES * _inDesiredFormat.mChannelsPerFrame;
-  std::vector<SInt16> recordBuffer(noRecSamples);
+  UInt32 numChannels = _inStreamFormat.mChannelsPerFrame;
   UInt32 size = ENGINE_REC_BUF_SIZE_IN_SAMPLES;
+  std::vector<SInt16> recordBuffer;
 
-  AudioBufferList engineBuffer;
-  engineBuffer.mNumberBuffers = 1;  // Interleaved channels.
-  engineBuffer.mBuffers->mNumberChannels = _inDesiredFormat.mChannelsPerFrame;
-  engineBuffer.mBuffers->mDataByteSize =
-      _inDesiredFormat.mBytesPerPacket * noRecSamples;
-  engineBuffer.mBuffers->mData = recordBuffer.data();
+  // For multi-channel Float32 input devices requesting mono output, bypass
+  // AudioConverter and downmix manually. AudioConverter fails silently for
+  // certain multi-channel Float32 configurations (e.g., Audient EVO, MOTU,
+  // Focusrite interfaces), delivering silence or corrupted audio instead of
+  // the expected mono mix. See
+  // https://bugs.chromium.org/p/webrtc/issues/detail?id=42221475. Non-Float32
+  // devices and stereo output requests continue to use the AudioConverter path,
+  // which handles those cases correctly.
+  bool isFloat32 =
+      (_inStreamFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+  if (numChannels > 1 && _inDesiredFormat.mChannelsPerFrame == 1 && isFloat32) {
+    ring_buffer_size_t numSamplesToRead =
+        ENGINE_REC_BUF_SIZE_IN_SAMPLES * numChannels;
 
-  err = AudioConverterFillComplexBuffer(_captureConverter, inConverterProc,
-                                        this, &size, &engineBuffer, NULL);
-  if (err != noErr) {
-    if (err == 1) {
-      // This is our own error.
-      return false;
-    } else {
-      logCAMsg(LS_ERROR, "Error in AudioConverterFillComplexBuffer()",
-               (const char*)&err);
-      return false;
+    // Wait for enough data in the ring buffer. _captureSemaphore is signalled
+    // by implInDeviceIOProc each time new data is written to _paCaptureBuffer.
+    // This mirrors the design of the standard AudioConverter path in
+    // implInConverterProc, with the same timeout and liveness check.
+    while (PaUtil_GetRingBufferReadAvailable(_paCaptureBuffer) <
+           numSamplesToRead) {
+      mach_timespec_t timeout;
+      timeout.tv_sec = 0;
+      timeout.tv_nsec = TIMER_PERIOD_MS;
+
+      kern_return_t kernErr = semaphore_timedwait(_captureSemaphore, timeout);
+      if (kernErr == KERN_OPERATION_TIMED_OUT) {
+        int32_t signal = _captureDeviceIsAlive;
+        if (signal == 0) {
+          return false;
+        }
+      } else if (kernErr != KERN_SUCCESS) {
+        RTC_LOG(LS_ERROR) << "semaphore_wait() error: " << kernErr;
+      }
+    }
+
+    // Read multi-channel Float32 data from ring buffer.
+    _captureMultiChannelBuffer.resize(numSamplesToRead);
+    PaUtil_ReadRingBuffer(_paCaptureBuffer, _captureMultiChannelBuffer.data(),
+                          numSamplesToRead);
+
+    // Convert Float32 to int16 by mixing all channels to mono.
+    recordBuffer.resize(ENGINE_REC_BUF_SIZE_IN_SAMPLES);
+    ConvertFloat32ToInt16Mono(_captureMultiChannelBuffer, recordBuffer,
+                              numChannels);
+  } else {
+    // Standard path: single-channel devices, non-Float32 devices, or stereo
+    // output requests. AudioConverter handles sample rate conversion and
+    // format conversion (e.g., Int16 -> Int16) via implInConverterProc.
+    UInt32 noRecSamples =
+        ENGINE_REC_BUF_SIZE_IN_SAMPLES * _inDesiredFormat.mChannelsPerFrame;
+    recordBuffer.resize(noRecSamples);
+
+    AudioBufferList engineBuffer;
+    engineBuffer.mNumberBuffers = 1;  // Interleaved channels.
+    engineBuffer.mBuffers->mNumberChannels = _inDesiredFormat.mChannelsPerFrame;
+    engineBuffer.mBuffers->mDataByteSize =
+        _inDesiredFormat.mBytesPerPacket * noRecSamples;
+    engineBuffer.mBuffers->mData = recordBuffer.data();
+
+    err = AudioConverterFillComplexBuffer(_captureConverter, inConverterProc,
+                                          this, &size, &engineBuffer, NULL);
+    if (err != noErr) {
+      if (err == 1) {
+        // This is our own error.
+        return false;
+      } else {
+        logCAMsg(LS_ERROR, "Error in AudioConverterFillComplexBuffer()",
+                 (const char*)&err);
+        return false;
+      }
+    }
+
+    // AudioConverter may return fewer samples than requested.
+    // TODO(xians): what if the returned size is incorrect?
+    if (size != ENGINE_REC_BUF_SIZE_IN_SAMPLES) {
+      return true;
     }
   }
 
-  // TODO(xians): what if the returned size is incorrect?
-  if (size == ENGINE_REC_BUF_SIZE_IN_SAMPLES) {
-    int32_t msecOnPlaySide;
-    int32_t msecOnRecordSide;
+  // Deliver recorded buffer to AudioDeviceBuffer.
+  int32_t captureDelayUs = _captureDelayUs;
+  int32_t renderDelayUs = _renderDelayUs;
+  int32_t msecOnPlaySide =
+      static_cast<int32_t>(1e-3 * (renderDelayUs + _renderLatencyUs) + 0.5);
+  int32_t msecOnRecordSide =
+      static_cast<int32_t>(1e-3 * (captureDelayUs + _captureLatencyUs) + 0.5);
 
-    int32_t captureDelayUs = _captureDelayUs;
-    int32_t renderDelayUs = _renderDelayUs;
-
-    msecOnPlaySide =
-        static_cast<int32_t>(1e-3 * (renderDelayUs + _renderLatencyUs) + 0.5);
-    msecOnRecordSide =
-        static_cast<int32_t>(1e-3 * (captureDelayUs + _captureLatencyUs) + 0.5);
-
-    if (!_ptrAudioBuffer) {
-      RTC_LOG(LS_ERROR) << "capture AudioBuffer is invalid";
-      return false;
-    }
-
-    // store the recorded buffer (no action will be taken if the
-    // #recorded samples is not a full buffer)
-    _ptrAudioBuffer->SetRecordedBuffer((int8_t*)recordBuffer.data(),
-                                       (uint32_t)size);
-    _ptrAudioBuffer->SetVQEData(msecOnPlaySide, msecOnRecordSide);
-    _ptrAudioBuffer->SetTypingStatus(KeyPressed());
-
-    // deliver recorded samples at specified sample rate, mic level etc.
-    // to the observer using callback
-    _ptrAudioBuffer->DeliverRecordedData();
+  if (!_ptrAudioBuffer) {
+    RTC_LOG(LS_ERROR) << "capture AudioBuffer is invalid";
+    return false;
   }
+
+  // Store the recorded buffer (no action will be taken if the
+  // #recorded samples is not a full buffer).
+  _ptrAudioBuffer->SetRecordedBuffer(
+      reinterpret_cast<int8_t*>(recordBuffer.data()),
+      ENGINE_REC_BUF_SIZE_IN_SAMPLES);
+  _ptrAudioBuffer->SetVQEData(msecOnPlaySide, msecOnRecordSide);
+  _ptrAudioBuffer->SetTypingStatus(KeyPressed());
+  // Deliver recorded samples at specified sample rate, mic level etc.
+  // to the observer using callback.
+  _ptrAudioBuffer->DeliverRecordedData();
 
   return true;
+}
+
+void AudioDeviceMac::ConvertFloat32ToInt16Mono(
+    ArrayView<const Float32> multi_channel_input,
+    ArrayView<SInt16> mono_output,
+    UInt32 num_channels) {
+  const UInt32 num_frames = static_cast<UInt32>(mono_output.size());
+  const Float32 inv_num_channels = 1.0f / static_cast<Float32>(num_channels);
+  for (UInt32 frame = 0; frame < num_frames; frame++) {
+    // Mix all channels by averaging them together (standard downmixing).
+    Float32 mixed_sample = 0.0f;
+    for (UInt32 ch = 0; ch < num_channels; ch++) {
+      mixed_sample += multi_channel_input[frame * num_channels + ch];
+    }
+    mixed_sample *= inv_num_channels;
+
+    // Clamp to [-1.0, 1.0] range before conversion.
+    mixed_sample = std::clamp(mixed_sample, -1.0f, 1.0f);
+
+    // Convert to int16 range [-32768, 32767].
+    mono_output[frame] = static_cast<SInt16>(mixed_sample * 32767.0f);
+  }
 }
 
 bool AudioDeviceMac::KeyPressed() {
